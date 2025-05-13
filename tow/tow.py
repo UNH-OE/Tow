@@ -10,8 +10,9 @@ from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 
-from .__init__ import __version__
 from .mainwindow import *
+
+_thisdir = os.path.dirname(os.path.abspath(__file__))
 
 
 class MainWindow(QMainWindow):
@@ -35,6 +36,7 @@ class MainWindow(QMainWindow):
         self.ui.velSpinBox_baf2.setMaximum(2.0)
 
         # Set initial states of all buttons
+        self.ui.tabWidgetMode.setEnabled(False)
         self.ui.rbAbsolute.setEnabled(False)
         self.ui.rbAbsolute_baf.setEnabled(False)
         self.ui.enableAxis.setEnabled(False)
@@ -54,7 +56,8 @@ class MainWindow(QMainWindow):
 
         # Add some labels to the status bar
         self.hlabel = QLabel()
-        self.hlabel.setText("Not homed ")
+        self.hlabel.setStyleSheet("color: red;")
+        self.hlabel.setText(" Not homed ")
         self.ui.statusBar.addWidget(self.hlabel)
         self.poslabel = QLabel()
         self.poslabel.setText("Pos. (m): ")
@@ -81,13 +84,17 @@ class MainWindow(QMainWindow):
         # Connect to the controller
         self.simulator = False
         self.retry = True
-        if self.simulator:
-            self.hcomm = acsc.openCommDirect()
-        else:
-            self.hcomm = acsc.openCommEthernetTCP("10.0.0.100", 701)
-
-        # If connection fails, bring up error message box
-        while self.hcomm == acsc.INVALID and self.retry:
+        self.hcomm = acsc.INVALID
+        while self.retry and self.hcomm == acsc.INVALID:
+            try:
+                if self.simulator:
+                    self.hcomm = acsc.openCommDirect()
+                else:
+                    self.hcomm = acsc.openCommEthernetTCP("10.0.0.100", 701)
+                break
+            except acsc.AcscError:
+                self.hcomm = acsc.INVALID
+            # If connection fails, bring up error message box
             msgtxt = "Unable to connect to controller.\n\n"
             msgtxt += "Check that controller is powered-on and "
             msgtxt += "SPiiPlus User Mode Driver is running."
@@ -99,14 +106,9 @@ class MainWindow(QMainWindow):
             c_err_box.setStandardButtons(QMessageBox.Retry | QMessageBox.Abort)
             c_err_box.setDefaultButton(QMessageBox.Retry)
             c_err_box.addButton("Use &Simulator", QMessageBox.AcceptRole)
-
             ret = c_err_box.exec_()
-
             if ret == QMessageBox.Retry:
-                if self.simulator:
-                    self.hcomm = acsc.openCommDirect()
-                else:
-                    self.hcomm = acsc.openCommEthernetTCP("10.0.0.100", 701)
+                continue
             elif ret == QMessageBox.Abort:
                 self.connectfail = True
                 self.retry = False
@@ -114,6 +116,7 @@ class MainWindow(QMainWindow):
             elif ret == QMessageBox.AcceptRole:
                 self.simulator = True
                 self.hcomm = acsc.openCommDirect()
+                self.retry = False
 
         if self.hcomm != acsc.INVALID:
             self.timer_slow.start(150)
@@ -125,7 +128,8 @@ class MainWindow(QMainWindow):
         acsc.registerEmergencyStop()
 
         # Make sure jog program is not running
-        acsc.stopBuffer(self.hcomm, 5)
+        if self.hcomm != acsc.INVALID:
+            acsc.stopBuffer(self.hcomm, 5)
 
         # Create the jog group action group
         self.offset_group = QActionGroup(self)
@@ -234,6 +238,10 @@ class MainWindow(QMainWindow):
         self.ui.pbGo_baf.clicked.connect(self.on_go_baf)
 
     def on_timer_slow(self):
+        if self.hcomm == acsc.INVALID:
+            self.close()
+            return
+
         self.axis_enabled = acsc.getMotorEnabled(self.hcomm, self.axis)
 
         if self.axis_enabled:
@@ -247,7 +255,7 @@ class MainWindow(QMainWindow):
             self.jogmode = False
             acsc.stopBuffer(self.hcomm, 5)
 
-        if self.simulator == False:
+        if not self.simulator:
             self.homecounter = acsc.readInteger(
                 self.hcomm, None, "homeCounter_tow"
             )
@@ -255,19 +263,26 @@ class MainWindow(QMainWindow):
     def on_timer_fast(self):
         if self.hcomm == acsc.INVALID:
             self.close()
-        self.ui.tabWidgetMode.setEnabled(self.axis_enabled)
+            return
+
+        enable_moves = (
+            self.homecounter > 0 or self.override
+        ) and self.axis_enabled
+        self.ui.tabWidgetMode.setEnabled(enable_moves)
         self.ui.dock_jog.setEnabled(self.axis_enabled)
         self.ui.pbJogPendant.setEnabled(self.axis_enabled)
         self.ui.toolBar_Jog.setEnabled(self.axis_enabled)
 
-        if self.homecounter > 0 or self.override == True:
+        if self.homecounter > 0 or self.override:
+            self.ui.labelNotHomed.setVisible(False)
             self.ui.rbAbsolute.setEnabled(True)
             self.ui.rbAbsolute_baf.setEnabled(True)
             if self.homecounter > 0:
                 self.ui.groupBox_shortcuts.setEnabled(True)
-                self.hlabel.setText("Homed ")
+                self.hlabel.setText(" Homed ")
+                self.hlabel.setStyleSheet("color: green;")
 
-        if self.jogmode == True:
+        if self.jogmode:
             self.ui.pbJogPendant.setChecked(True)
             self.ui.actionJogPendant.setChecked(True)
         else:
@@ -275,10 +290,13 @@ class MainWindow(QMainWindow):
             self.ui.actionJogPendant.setChecked(False)
 
         # Get and display reference position and velocity
-        self.rpos = acsc.getRPosition(self.hcomm, self.axis)
-        self.rvel = acsc.getRVelocity(self.hcomm, self.axis)
-        self.poslabel.setText("Pos. (m): %.3f " % self.rpos)
-        self.vellabel.setText("Vel. (m/s): %.2f " % self.rvel)
+        try:
+            self.rpos = acsc.getRPosition(self.hcomm, self.axis)
+            self.rvel = acsc.getRVelocity(self.hcomm, self.axis)
+            self.poslabel.setText("Pos. (m): %.3f " % self.rpos)
+            self.vellabel.setText("Vel. (m/s): %.2f " % self.rvel)
+        except Exception as e:
+            print(f"Failed to get reference position/velocity: {e}")
 
     def on_enableAxis_click(self):
         if not self.axis_enabled:
@@ -309,7 +327,7 @@ class MainWindow(QMainWindow):
         acsc.setAcceleration(self.hcomm, self.axis, acc)
         acsc.setDeceleration(self.hcomm, self.axis, acc)
         acsc.setJerk(self.hcomm, self.axis, acc * 10)
-        if self.ui.rbRelative.isChecked() == True:
+        if self.ui.rbRelative.isChecked():
             flags = acsc.AMF_RELATIVE
         else:
             flags = None
@@ -366,19 +384,26 @@ class MainWindow(QMainWindow):
         acsc.halt(self.hcomm, self.axis)
 
     def on_JogPendant(self):
-        if self.jogmode == False:
+        if not self.jogmode:
             self.jogmode = True
             acsc.runBuffer(self.hcomm, 5, None)
-        elif self.jogmode == True:
+        elif self.jogmode:
             acsc.stopBuffer(self.hcomm, 5)
             self.jogmode = False
 
     def on_halt(self):
-        acsc.writeInteger(self.hcomm, "move", 0)
+        try:
+            acsc.writeInteger(self.hcomm, "move", 0)
+        except acsc.AcscError as e:
+            print(f"ACSC exception in on_halt: {e}")
         acsc.stopBuffer(self.hcomm, 19)
         acsc.halt(self.hcomm, self.axis)
 
     def on_actionAbout(self):
+        """Show the about dialog."""
+        import tow
+
+        __version__ = tow.__version__
         about_text = "<b>Tow {}</b><br>".format(__version__)
         about_text += "A simple towing app for the UNH tow tank<br><br>"
         about_text += "By Pete Bachant<br>"
@@ -460,8 +485,10 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(url)
 
     def closeEvent(self, event):
-        acsc.stopBuffer(self.hcomm, 5)
-        acsc.closeComm(self.hcomm)
+        if self.hcomm != acsc.INVALID:
+            acsc.stopBuffer(self.hcomm, 5)
+            acsc.stopBuffer(self.hcomm, 19)
+            acsc.closeComm(self.hcomm)
         acsc.unregisterEmergencyStop()
         self.settings["Last window location"] = [
             self.pos().x(),
@@ -493,10 +520,14 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     app = QApplication(sys.argv)
     height = QDesktopWidget().screenGeometry().height()
     width = QDesktopWidget().screenGeometry().width()
     w = MainWindow()
+    w.setWindowIcon(
+        QtGui.QIcon(os.path.join(_thisdir, "icons", "tow_icon.svg"))
+    )
     w.show()
     w.setFixedSize(w.size())
     sys.exit(app.exec_())
